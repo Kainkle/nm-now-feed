@@ -16,6 +16,20 @@ from datetime import datetime, timedelta, timezone
 
 EPG_URL = "https://epg.pw/xmltv/epg_US.xml.gz"
 
+# epg.pw's US file stamps wall times in UTC+8 while labelling every attribute "+0000".
+# Measured 2026-08-26 against the real US/Eastern broadcast day, 12+ anchors across three
+# channels, every one exactly +8h and none off-pattern:
+#   FNC Jesse Watters   really 8:00pm  ET = 00:00Z -> stamped 20260826080000 +0000
+#   FNC The Five        really 5:00pm  ET = 21:00Z -> stamped 20260826050000 +0000
+#   ESPN Get Up         really 8:00am  ET = 12:00Z -> stamped 20260826200000 +0000
+#   ABC  Kimmel         really 11:35pm ET = 03:35Z -> stamped 20260826113500 +0000
+#   FNC Faulkner Focus  really 11:00am ET = 15:00Z -> stamped 20260826230000 +0000
+# (epg.pw is an APAC-operated aggregator; their web UI offers a timezone selector but the
+# XMLTV endpoints are static files with no tz parameter -- there is no correct-UTC file.)
+# If they ever fix the stamps, build.py's ANCHORS log line will show every anchor ~8h
+# displaced and this constant goes to 0.
+EPG_WALL_TZ_HOURS = 8
+
 _PROG_OPEN = re.compile(r"<programme ([^>]*)>")
 # Attribute order inside <programme> varies (channel-first in the wild) — never assume.
 _ATTR = lambda tag, name: re.search(r'%s="([^"]*)"' % name, tag)
@@ -31,7 +45,8 @@ def _as_utc(stamp: str, offset: str | None) -> datetime:
         dt = dt.replace(tzinfo=timezone(sign * timedelta(hours=int(offset[1:3]), minutes=int(offset[3:5]))))
     else:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    # The source's wall times are UTC+8 despite the +0000 label -- see EPG_WALL_TZ_HOURS.
+    return dt.astimezone(timezone.utc) - timedelta(hours=EPG_WALL_TZ_HOURS)
 
 
 def _clean(text: str | None) -> str:

@@ -87,6 +87,18 @@ def main() -> int:
     total_progs = sum(len(v) for v in progs.values())
     print("epg: %d/%d mapped ids carry programmes in window, %d rows" % (mapped, len(wanted), total_progs))
 
+    # Drift tripwire for the EPG_WALL_TZ_HOURS correction (see epg.py): print what three
+    # well-known channels claim is airing AT THIS MINUTE. Eyeball it against reality --
+    # a morning build saying "Jesse Watters Primetime" / an evening build saying
+    # "Fox & Friends" means the source's stamps moved and the constant needs re-measuring.
+    ANCHORS = {"465372": "FOX News", "465198": "ESPN", "464902": "ABC"}
+    for cid, name in ANCHORS.items():
+        for p in progs.get(cid, []):
+            st = datetime.strptime(p["start_utc"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            if st <= now < st + timedelta(minutes=p["duration_min"]):
+                print("anchor %-9s airing now: %s" % (name, p["title"]))
+                break
+
     # --- emit ---
     channels = []
     gap_notes = 0
