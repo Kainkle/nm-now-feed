@@ -1,0 +1,7 @@
+__pycache__/
+feed/.epg_US.xml.gz.tmp
+# local builder-input caches - CI fetches fresh
+epg_snapshot.xml.gz
+ntv_channels.json
+epg_channels_idx.json
+match_result.json

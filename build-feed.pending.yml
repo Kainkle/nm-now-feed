@@ -1,0 +1,42 @@
+name: build-feed
+
+on:
+  schedule:
+    # Every 30 minutes. Titan stream tokens live 4h, so a published URL is never more
+    # than ~35 min old even with a late run. Off the :00/:30 busy marks.
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # A late run must not stack on a running one and produce conflicting commits.
+  group: build-feed
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build feed
+        # Hard failures abort the job and leave the previous feed published. Per-channel
+        # stream failures degrade that channel only and heal on the next 30-min rebuild.
+        # The NTV catalog fetch can take ~2 min cold — their server cache, not us.
+        run: python -m nmnowfeed.build --out feed
+      - name: Commit if changed
+        run: |
+          git config user.name "nm-now-feed bot"
+          git config user.email "actions@github.com"
+          # Never commit an empty feed over a working one.
+          COUNT=$(python -c "import json;print(len(json.load(open('feed/lineup.json'))['channels']))")
+          PROGS=$(python -c "import json;print(sum(len(c['programmes']) for c in json.load(open('feed/lineup.json'))['channels']))")
+          echo "channels: $COUNT  programmes: $PROGS"
+          if [ "$COUNT" -eq 0 ]; then echo "empty feed - refusing to commit"; exit 0; fi
+          git add feed/
+          git diff --staged --quiet || git commit -m "feed: $COUNT channels, $PROGS programmes [skip ci]"
+          git push
