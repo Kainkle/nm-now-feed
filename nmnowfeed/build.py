@@ -22,14 +22,17 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
-from . import epg, matching, titan
+from . import epg, gen_dlhd, matching, phoenix, titan
 from .lineup import CATEGORIES, LINEUP, LINEUP_INTL
 
 CATALOG_URL = "https://ntv.cx/api/get-channels"
 CATALOG_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-# Publish window: a little history (so "now playing" is right) plus ~a day and a half ahead.
+# Publish window: a little history (so "now playing" is right) plus a day ahead.
+# Was 34h for the 411-channel v2 feed (~2.5 MB); the 1262-channel v3 feed crossed
+# the 6 MB size guard at 34h — a steady 30-min rebuild only ever needs to keep the
+# browsing lookahead covered, and 26h holds a full day plus the rebuild gap.
 WINDOW_BACK_MIN = 120
-WINDOW_FWD_MIN = 34 * 60
+WINDOW_FWD_MIN = 26 * 60
 EPG_CACHE_MAX_AGE_S = 6 * 3600
 
 # One self-titled show per epg.pw file, with the UTC minute-of-day its NAME promises.
@@ -111,12 +114,18 @@ def main() -> int:
     print("catalog: %d channels, %d titan rows (%d duplicate names collapsed)"
           % (len(catalog), len(titan_by), dupes))
 
-    rows = LINEUP + LINEUP_INTL
+    # dlhd tier regenerated from the LIVE catalog every build — NTV id/name churn can
+    # never rot it. Numbers stay stable because classify() is a pure function of the name.
+    dlhd_rows, dlhd_ids = gen_dlhd.build_rows(catalog, {gen_dlhd.norm(r[0]) for r in LINEUP + LINEUP_INTL})
+    rows = LINEUP + LINEUP_INTL + dlhd_rows
+    print("dlhd tier: %d rows generated" % len(dlhd_rows))
     catalog_us = {name for (cc, name) in titan_by if cc == "us"}
     uncurated = catalog_us - {r[0] for r in LINEUP}
     if uncurated:
         print("catalog titan-us channels not curated (intentional skips): %s" % ", ".join(sorted(uncurated)))
-    missing = [r for r in rows if (r[5].lower(), r[0]) not in titan_by]
+    # dlhd rows resolve by channel_id through phoenix, not by name through titan_by
+    # (some dlhd names coincidentally match titan keys — that must not pick the brand).
+    missing = [r for r in rows if r[1] not in dlhd_ids and (r[5].lower(), r[0]) not in titan_by]
     if missing:
         print("lineup rows MISSING from catalog (skipped this build): %s"
               % ", ".join("%s/%s" % (r[5], r[0]) for r in missing))
@@ -167,6 +176,15 @@ def main() -> int:
         number, name, cc = r[1], r[0], r[5].lower()
         if number in carry:
             return number, carry[number]
+        if number in dlhd_ids:  # Phoenix tier: id-keyed, referer-bearing StreamRef
+            time.sleep(0.2)
+            try:
+                st = phoenix.stream_ref(dlhd_ids[number])
+                st["minted_utc"] = now_s
+                return number, st
+            except Exception as e:  # noqa: BLE001 — any channel failure degrades that channel only
+                print("stream FAIL dlhd/%s: %s" % (name, str(e)[:120]))
+                return number, fallback.get(number)
         entry = titan_by.get((cc, name))
         if entry is None:
             return number, None
@@ -208,7 +226,9 @@ def main() -> int:
         displays, progs = epg.scan(gz, norms, want_ids, anchor_ids, since, until, wall_hours)
         got = set(progs.keys())
         matched_rows = sum(1 for r in rows_cc if r[1] in got)
-        miss_names = [r[0] for r in rows_cc if r[1] not in got]
+        # Numbers in the MISS list: cdnlive rows and their dlhd twins print the same
+        # name, and the number is the only way to tell which row actually lost EPG.
+        miss_names = ["#%s %s" % (r[1], r[0]) for r in rows_cc if r[1] not in got]
         print("epg %s: %d/%d channels carry programmes%s"
               % (country, matched_rows, len(rows_cc),
                  ("; MISS: " + ", ".join(miss_names[:12]) + (" +%d" % (len(miss_names) - 12) if len(miss_names) > 12 else "")) if miss_names else ""))
@@ -256,8 +276,9 @@ def main() -> int:
     gap_notes = 0
     for row in sorted(rows, key=lambda r: int(r[1])):
         ntv_name, number, display, short, cat, cc, epg_id = row
-        entry = titan_by.get((cc.lower(), ntv_name))
-        if entry is None:
+        is_dlhd = number in dlhd_ids
+        entry = None if is_dlhd else titan_by.get((cc.lower(), ntv_name))
+        if entry is None and not is_dlhd:
             print("row %s %s: not in catalog — SKIPPED" % (number, ntv_name))
             continue
         plist = [dict(p) for p in progs_by_number.get(number, [])]
@@ -284,7 +305,9 @@ def main() -> int:
             "short": short,
             "category": cat,
             "favorite": False,
-            "logo_url": entry.get("channel_image") or "",
+            # dlhd rows have no titan_by entry (they key on channel_id) — the catalog
+            # carries no images for them either, so they ship with an empty logo.
+            "logo_url": (entry.get("channel_image") if entry else "") or "",
             "stream": stream,
             "programmes": plist,
         })
@@ -295,6 +318,7 @@ def main() -> int:
             [{"id": "recents", "label": "Recents", "icon": "recents"},
              {"id": "favorites", "label": "Favorites", "icon": "favorites", "dividerAfter": True}]
             + [{"id": i, "label": l, "icon": ic} for i, l, ic in CATEGORIES]
+            + [{"id": i, "label": l, "icon": ic} for i, l, ic in gen_dlhd.EXTRA_CATEGORIES]
             + [{"id": "all", "label": "All Channels", "icon": "all"}]
         ),
         "channels": channels,

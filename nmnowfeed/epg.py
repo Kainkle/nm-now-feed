@@ -93,12 +93,14 @@ def _norm_key(display: str) -> str:
     return "".join(tokens)
 
 
-def scan(gz_path: str, want_norms: dict[str, str], want_ids: dict[str, str], anchor_ids: dict[str, str], since: datetime, until: datetime, wall_hours: int):
+def scan(gz_path: str, want_norms: dict[str, list[str]], want_ids: dict[str, str], anchor_ids: dict[str, str], since: datetime, until: datetime, wall_hours: int):
     """One streaming pass over a country file.
 
-    `want_norms` maps _norm_key(channel name) -> a stable key (the feed channel number);
+    `want_norms` maps _norm_key(channel name) -> [stable keys] (feed channel numbers);
     matching.py may seed several norms for one number (synonyms, e.g. the Latin
-    transliteration of a Cyrillic channel). `want_ids` maps a raw epg channel id -> the
+    transliteration of a Cyrillic channel) and several numbers for one norm (dlhd
+    twins of cdnlive channels) — one epg id then carries the schedule for every twin.
+    `want_ids` maps a raw epg channel id -> the
     same key and binds irrevocably ahead of any name matching — the US lineup's curated
     ids go through it. All <channel> blocks precede the programmes
     in these files, so the pass resolves which epg ids are wanted as it meets them, then
@@ -124,22 +126,27 @@ def scan(gz_path: str, want_norms: dict[str, str], want_ids: dict[str, str], anc
     def sweep_variants():
         """Prefix-bind remaining wants. Exact matches always win; this only runs once."""
         bound = {n for keys in matched.values() for n in keys}
-        for wnorm, number in want_norms.items():
-            if number in bound:
-                continue
-            cands = [
-                (dn, cid) for (norm, dn, cid) in seen
-                if cid not in matched and norm != wnorm
-                and (norm.startswith(wnorm) or wnorm.startswith(norm))
-                and min(len(norm), len(wnorm)) >= 6
-            ]
-            if not cands:
-                continue
-            # Non-timeshift first, then the shortest display (national beats regional),
-            # then lowest id — fully deterministic for a given file.
-            cands.sort(key=lambda c: ("+1" in c[0].lower() or "plus 1" in c[0].lower(), len(c[0]), c[1]))
-            matched[cands[0][1]] = [number]
-            displays[cands[0][1]] = cands[0][0]
+        for wnorm, numbers in want_norms.items():
+            for number in numbers:
+                if number in bound:
+                    continue
+                cands = [
+                    (dn, cid) for (norm, dn, cid) in seen
+                    if cid not in matched and norm != wnorm
+                    and (norm.startswith(wnorm) or wnorm.startswith(norm))
+                    and min(len(norm), len(wnorm)) >= 6
+                ]
+                if not cands:
+                    continue
+                # Non-timeshift first, then the shortest display (national beats regional),
+                # then lowest id — fully deterministic for a given file.
+                cands.sort(key=lambda c: ("+1" in c[0].lower() or "plus 1" in c[0].lower(), len(c[0]), c[1]))
+                matched[cands[0][1]] = [number]
+                displays[cands[0][1]] = cands[0][0]
+                # bound must grow as we bind: two norms can share a number (synonyms),
+                # and without this the second prefix-binds a second epg id to it and
+                # the schedule lands twice under that number.
+                bound.add(number)
 
     def close_channel(blk: str):
         cid = re.search(r'id="([^"]+)"', blk)
@@ -160,9 +167,12 @@ def scan(gz_path: str, want_norms: dict[str, str], want_ids: dict[str, str], anc
             keys.append(want_ids[cid.group(1)])
         if cid.group(1) in anchor_ids:
             keys.append(anchor_ids[cid.group(1)])
-        key = want_norms.get(norm)
-        if key and key not in keys and key not in {n for ks in matched.values() for n in ks}:
-            keys.append(key)
+        # A norm can name several feed numbers (dlhd twins); bind every unbound one.
+        # The global guard keeps each number on exactly ONE epg id, so twin rows share
+        # a single epg channel's schedule instead of each inventing its own.
+        for key in want_norms.get(norm, ()):
+            if key not in keys and key not in {n for ks in matched.values() for n in ks}:
+                keys.append(key)
         if keys:
             matched[cid.group(1)] = keys
             displays[cid.group(1)] = display
