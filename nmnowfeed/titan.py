@@ -4,9 +4,10 @@ Chain: catalog `channel_url` (cdnlivetv.tv player page) -> inline script defines
 RANDOM-NAMED base64 decoder and split fragments assembled as `var X=fn(a)+fn(b)...;`
 -> decodes to https://cdnlivetv.tv/secure/api/v1/{oid}/playlist.m3u8?token={token}.
 
-The m3u8 is playable with a plain browser UA (no Referer). Tokens live 4 hours, which
-is why the feed rebuilds every 30 minutes — a published URL is never more than ~35
-minutes old in practice.
+The m3u8 is playable with a plain browser UA (no Referer). Tokens live 4 hours;
+build.py stamps each resolved stream with minted_utc and carries streams younger
+than ~2.5h over between builds, re-resolving only the rest (see build.py — request
+volume, not token life, is what sets the rebuild budget).
 
 TRAP: the decoder function name is randomized per page load. Never hardcode it (the
 first probe failed exactly this way — NO-ASSEMBLY on every channel). Discover it with
@@ -15,6 +16,8 @@ first probe failed exactly this way — NO-ASSEMBLY on every channel). Discover 
 
 import base64
 import re
+import time
+import urllib.error
 import urllib.request
 
 BROWSER_UA = (
@@ -27,9 +30,18 @@ _FRAGS = re.compile(r"var (\w+)='([^']*)'")
 _ASSEMBLY = r"%s\((\w+)\)"
 
 
-def _fetch(url: str, timeout: int = 25) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA})
-    return urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "replace")
+def _fetch(url: str, timeout: int = 25, retries: int = 3) -> str:
+    """Player-page fetch with 429 backoff — cdnlivetv.tv throttles bursts (measured:
+    ~250 rapid requests earn a 429 wall; backing off seconds clears it)."""
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA})
+        try:
+            return urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < retries:
+                time.sleep(1.5 * (attempt + 1) ** 2)  # 1.5s, 6s, 13.5s
+                continue
+            raise
 
 
 def _deob(b64: str) -> str:
@@ -39,7 +51,16 @@ def _deob(b64: str) -> str:
 
 
 def resolve(player_url: str) -> str:
-    """Return the signed m3u8 URL for a Titan channel player page."""
+    """Return the signed m3u8 URL for a Titan channel player page.
+
+    All 414 catalog URLs point at cdnlivetv.tv, which rate-limits the player route
+    brutally (measured 2026-08-26: ~500 requests in an hour walls the IP for hours —
+    the homepage still 200s, only the player route 429s). The IDENTICAL page on
+    api.cdnlivetv.tv is unthrottled, uses the same atob decoder chain, and mints the
+    same 4h tokens bound to the api host. Rewrite before fetching; never hammer the
+    apex host again.
+    """
+    player_url = player_url.replace("://cdnlivetv.tv", "://api.cdnlivetv.tv")
     html = _fetch(player_url)
     fn = _DECODER.search(html).group(1)
     frags = dict(_FRAGS.findall(html))
