@@ -152,6 +152,7 @@ def main() -> int:
 
     carry: dict[str, dict] = {}
     fallback: dict[str, dict] = {}
+    prev_ph: dict[str, dict] = {}
     prev_path = os.path.join(args.out, "lineup.json")
     if os.path.exists(prev_path):
         try:
@@ -167,8 +168,20 @@ def main() -> int:
                         carry[ch["number"]] = st
                     elif age < STREAM_FALLBACK_MAX_AGE_MIN:
                         fallback[ch["number"]] = st
+                    if "romponalis.st" in st.get("referer", "") or "xameleon" in st["url"]:
+                        prev_ph[ch["number"]] = st
         except (ValueError, OSError):
             pass  # unreadable previous feed — resolve everything fresh
+
+    # PHOENIX IS IP-BOUND (measured 2026-08-27): xameleon masters 200 only for the IP
+    # that minted them. A GitHub runner mint resolves EXTM3U fine from the runner and
+    # 403s from every box. So CI NEVER mints phoenix — it carries the previous feed's
+    # phoenix URLs untouched (age-irrelevant: a home-minted URL either still plays or
+    # the next home build replaces it) and only home/lan builds resolve the tier fresh.
+    ci_mode = os.environ.get("GITHUB_ACTIONS") == "true"
+    if ci_mode and dlhd_ids:
+        print("CI mode: phoenix carried untouched from previous feed (%d urls) — IP-bound tier"
+              % len(prev_ph))
 
     now_s = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -176,6 +189,8 @@ def main() -> int:
         number, name, cc = r[1], r[0], r[5].lower()
         if number in carry:
             return number, carry[number]
+        if number in dlhd_ids and ci_mode:  # IP-bound tier: a runner mint is DOA on boxes
+            return number, prev_ph.get(number)
         if number in dlhd_ids:  # Phoenix tier: id-keyed, referer-bearing StreamRef
             time.sleep(0.2)
             try:

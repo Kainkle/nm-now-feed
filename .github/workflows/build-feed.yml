@@ -2,8 +2,9 @@ name: build-feed
 
 on:
   schedule:
-    # Every 30 minutes. Titan tokens live 4h and Phoenix 3h, so a published URL is
-    # never more than ~35 min old even with a late run. Off the :00/:30 busy marks.
+    # Every 30 minutes: refreshes Titan tokens (4h TTL) and EPG. Phoenix (3h TTL) is
+    # IP-bound to the minting IP, so this loop CARRIES phoenix URLs (home builds mint
+    # them) — see the Build feed comment. Off the :00/:30 busy marks.
     - cron: "7,37 * * * *"
   workflow_dispatch:
 
@@ -28,9 +29,10 @@ jobs:
         # Hard failures abort the job and leave the previous feed published. Per-channel
         # stream failures degrade that channel only and heal on the next 30-min rebuild.
         # The NTV catalog fetch can take ~2 min cold — their server cache, not us.
-        # v3: 411 Titan + 851 Phoenix resolutions (paced) + 9 EPG downloads — a cold
-        # run measures ~15-20 min; the carry-over from the committed previous feed
-        # keeps the steady state far below that.
+        # v3.1: Phoenix is IP-BOUND — a runner mint 403s on every box — so CI carries
+        # the previous feed's phoenix URLs untouched and mints nothing; only Titan
+        # (IP-agnostic) + 9 EPG files are re-resolved here. Phoenix re-mints happen on
+        # the home network's builds. Cold run ~10-15 min.
         run: python -m nmnowfeed.build --out feed
       - name: Commit if changed
         run: |
