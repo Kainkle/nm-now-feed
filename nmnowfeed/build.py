@@ -150,9 +150,12 @@ def main() -> int:
             return None
         return (now - minted).total_seconds() / 60
 
-    carry: dict[str, dict] = {}
-    fallback: dict[str, dict] = {}
-    prev_ph: dict[str, dict] = {}
+    # Carries are (name, stream) pairs, not bare streams: numbers are assigned by
+    # catalog order, and a catalog reshuffle renumbers the tier — carrying by number
+    # alone would then hand channel B the URL minted for channel A. Same-name-or-nothing.
+    carry: dict[str, tuple[str, dict]] = {}
+    fallback: dict[str, tuple[str, dict]] = {}
+    prev_ph: dict[str, tuple[str, dict]] = {}
     prev_path = os.path.join(args.out, "lineup.json")
     if os.path.exists(prev_path):
         try:
@@ -165,11 +168,11 @@ def main() -> int:
                     if age is None or age < 0:
                         continue
                     if age < STREAM_REUSE_MAX_AGE_MIN:
-                        carry[ch["number"]] = st
+                        carry[ch["number"]] = (ch["name"], st)
                     elif age < STREAM_FALLBACK_MAX_AGE_MIN:
-                        fallback[ch["number"]] = st
+                        fallback[ch["number"]] = (ch["name"], st)
                     if "romponalis.st" in st.get("referer", "") or "xameleon" in st["url"]:
-                        prev_ph[ch["number"]] = st
+                        prev_ph[ch["number"]] = (ch["name"], st)
         except (ValueError, OSError):
             pass  # unreadable previous feed — resolve everything fresh
 
@@ -187,10 +190,11 @@ def main() -> int:
 
     def resolve_row(r):
         number, name, cc = r[1], r[0], r[5].lower()
-        if number in carry:
-            return number, carry[number]
+        if number in carry and carry[number][0] == name:
+            return number, carry[number][1]
         if number in dlhd_ids and ci_mode:  # IP-bound tier: a runner mint is DOA on boxes
-            return number, prev_ph.get(number)
+            prev = prev_ph.get(number)
+            return number, (prev[1] if prev and prev[0] == name else None)
         if number in dlhd_ids:  # Phoenix tier: id-keyed, referer-bearing StreamRef
             time.sleep(0.2)
             try:
@@ -199,7 +203,8 @@ def main() -> int:
                 return number, st
             except Exception as e:  # noqa: BLE001 — any channel failure degrades that channel only
                 print("stream FAIL dlhd/%s: %s" % (name, str(e)[:120]))
-                return number, fallback.get(number)
+                prev = fallback.get(number)
+                return number, (prev[1] if prev and prev[0] == name else None)
         entry = titan_by.get((cc, name))
         if entry is None:
             return number, None
@@ -210,13 +215,32 @@ def main() -> int:
             return number, st
         except Exception as e:  # noqa: BLE001 — any channel failure degrades that channel only
             print("stream FAIL %s/%s: %s" % (cc, name, str(e)[:120]))
-            return number, fallback.get(number)
+            prev = fallback.get(number)
+            return number, (prev[1] if prev and prev[0] == name else None)
 
     # 4 workers + a short pause per request: a full 411-channel sweep is a once-ever
     # event now (steady state re-resolves ~80), and the one sweep that earned the
     # original 429 wall was 8 unpaced workers. Gentle costs ~30 extra seconds.
     with ThreadPoolExecutor(max_workers=4) as pool:
         streams = dict(pool.map(resolve_row, rows))
+
+    # Second pass, phoenix only: dlhd serves daddy-less shells to a client that has just
+    # hammered it with four workers (measured 2026-08-28: 1071/1262 on a cold sweep, 907
+    # on the re-run minutes later, same channels). A paced single-worker retry of only
+    # the failures recovers them without re-paying the full sweep.
+    phoenix_fails = [r for r in rows if r[1] in dlhd_ids and not streams.get(r[1])]
+    for r in phoenix_fails:
+        number, name = r[1], r[0]
+        time.sleep(1.0)
+        try:
+            st = phoenix.stream_ref(dlhd_ids[number])
+            st["minted_utc"] = now_s
+            streams[number] = st
+        except Exception:  # noqa: BLE001 — stays failed, exactly as the first pass left it
+            pass
+    if phoenix_fails:
+        recovered = sum(1 for r in phoenix_fails if streams.get(r[1]))
+        print("phoenix retry pass: %d/%d recovered" % (recovered, len(phoenix_fails)))
 
     ok = sum(1 for v in streams.values() if v)
     print("streams: %d/%d up (%d carried from previous feed, %d resolved fresh)"
@@ -237,8 +261,15 @@ def main() -> int:
         norms = matching.want_norms(rows_cc, country)
         if not want_ids and not norms and not anchor_ids:
             continue
-        gz = get_epg_gz(country, epg_dir)
-        displays, progs = epg.scan(gz, norms, want_ids, anchor_ids, since, until, wall_hours)
+        try:
+            gz = get_epg_gz(country, epg_dir)
+            displays, progs = epg.scan(gz, norms, want_ids, anchor_ids, since, until, wall_hours)
+        except (EOFError, OSError, ValueError) as e:
+            # A truncated/unreadable country file degrades THAT country to fillers — it
+            # must not kill the build (measured 2026-08-28: epg.pw served epg_US
+            # truncated server-side for hours; every other country was fine).
+            print("epg %s UNREADABLE, skipping country (%s)" % (country, str(e)[:80]))
+            continue
         got = set(progs.keys())
         matched_rows = sum(1 for r in rows_cc if r[1] in got)
         # Numbers in the MISS list: cdnlive rows and their dlhd twins print the same

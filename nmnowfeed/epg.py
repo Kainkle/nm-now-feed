@@ -34,7 +34,9 @@ changes a file's stamps, the build goes red instead of the guide going wrong.
 """
 
 import gzip
+import os
 import re
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -72,14 +74,33 @@ def _clean(text: str | None) -> str:
 
 
 def fetch(path: str, country: str) -> None:
-    """Download one country's gz snapshot to `path`."""
-    req = urllib.request.Request(EPG_URL % country, headers={"User-Agent": "nm-now-feed/1.0"})
-    with urllib.request.urlopen(req, timeout=300) as r, open(path, "wb") as f:
-        while True:
-            chunk = r.read(1 << 16)
-            if not chunk:
-                break
-            f.write(chunk)
+    """Download one country's gz snapshot to `path`, atomically and VERIFIED.
+
+    epg.pw occasionally serves a truncated body (measured 2026-08-28: EOFError one
+    past the stream marker, killing the whole build after a 25-minute stream sweep).
+    So: fetch to a .tmp, fully decompress it as a check, and only then move it into
+    place — a truncated download retries instead of crashing the build.
+    """
+    last: Exception | None = None
+    for attempt in range(3):
+        tmp = path + ".tmp"
+        try:
+            req = urllib.request.Request(EPG_URL % country, headers={"User-Agent": "nm-now-feed/1.0"})
+            with urllib.request.urlopen(req, timeout=300) as r, open(tmp, "wb") as f:
+                while True:
+                    chunk = r.read(1 << 16)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            with gzip.open(tmp, "rb") as f:  # full read = integrity check
+                while f.read(1 << 18):
+                    pass
+            os.replace(tmp, path)
+            return
+        except Exception as e:  # noqa: BLE001 — retry any download/decompress failure
+            last = e
+            time.sleep(2 * (attempt + 1))
+    raise last
 
 
 def _norm_key(display: str) -> str:
