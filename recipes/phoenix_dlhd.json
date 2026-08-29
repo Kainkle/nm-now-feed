@@ -1,0 +1,81 @@
+{
+  "source_id": "phoenix_dlhd",
+  "version": 1,
+  "status": "working",
+  "last_verified": "2026-08-28T11:50:00Z",
+  "engine": "http",
+  "content_key": "channel_id",
+  "steps": [
+    {
+      "action": "fetch",
+      "url": "https://dlhd.st/watch.php?id={content_id}",
+      "referer": "https://dlhd.st/24-7-channels.php",
+      "save_url": "$watch_url",
+      "save": "$watch_page",
+      "extract": [
+        {
+          "name": "$dlstreams",
+          "regex": "<iframe[^>]+src=\"(https?://[^\"]+)\"",
+          "multi": true,
+          "filter_contains": "dlstreams.st"
+        }
+      ]
+    },
+    {
+      "action": "fetch",
+      "url": "$dlstreams",
+      "referer": "$watch_url",
+      "save": "$stream_page",
+      "extract": [
+        {
+          "name": "$daddy",
+          "regex": "https?://[^\"]+/daddy\\d*\\.php\\?id=\\d+[^\"]*"
+        }
+      ]
+    },
+    {
+      "action": "fetch",
+      "url": "$daddy",
+      "referer": "$dlstreams",
+      "save": "$daddy_page",
+      "extract": [
+        {
+          "name": "$b64",
+          "regex": "atob\\(\\s*['\"]([A-Za-z0-9+/=]{30,})['\"]\\s*\\)"
+        }
+      ]
+    },
+    {
+      "action": "decode_base64",
+      "from": "$b64",
+      "variant": "std",
+      "save": "$master"
+    },
+    {
+      "action": "verify",
+      "url": "$master",
+      "referer": { "origin_of": "$daddy" },
+      "expect_first_line": "#EXTM3U"
+    }
+  ],
+  "output": {
+    "url": "$master",
+    "headers": {
+      "Referer": { "origin_of": "$daddy" },
+      "User-Agent": "$ua"
+    }
+  },
+  "token_behavior": {
+    "expires_seconds": 10800,
+    "bound_to": "minter_ip",
+    "mint_on": "player_error"
+  },
+  "known_child_domains": [
+    "dlhd.st",
+    "dlstreams.st",
+    "*.romponalis.st",
+    "xameleon.*"
+  ],
+  "escape_hatch": false,
+  "notes": "Traps, priority order: (1) the daddy shard ROTATES (hamis today, something else tomorrow) — the output Referer must be derived as origin_of the captured daddy URL, never written down; a hardcoded shard is a dead recipe. (2) Referers are exact-URL chained, not domain-level: watch page wants the 24-7 listing referer, dlstreams wants the exact watch URL, daddy wants the exact dlstreams URL, the master wants the daddy ORIGIN. (3) The m3u8 200s only with that origin referer — the verify step is the proof the chain walked correctly; a master that fails verify usually means the shard rotated mid-chain. (4) Secure URLs are IP-bound to the minting machine (180 min TTL) — which is exactly why this recipe runs on the box, not in a feed builder. (5) dlhd reorgs rotate the whole id space without notice; ids come from the ntv.cx catalog, and stale ids serve UNRELATED live-event pages — a chain that resolves but plays the wrong event means the id space rotated, not that this recipe broke."
+}

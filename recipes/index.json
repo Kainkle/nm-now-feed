@@ -1,0 +1,22 @@
+{
+  "_comment": "The registry index — the ONE url apps poll. Fetch a full recipe only when its version changes; refuse status=broken (fall back to the compiled chain). resolvers maps the StreamRef.resolver strings the feed emits to this recipe. Health-check job owns status + last_verified.",
+  "registry_version": 1,
+  "sources": [
+    {
+      "source_id": "phoenix_dlhd",
+      "resolvers": ["phoenix"],
+      "version": 1,
+      "status": "working",
+      "engine": "http",
+      "last_verified": "2026-08-28T11:50:00Z"
+    },
+    {
+      "source_id": "titan_cdnlive",
+      "resolvers": ["titan"],
+      "version": 1,
+      "status": "working",
+      "engine": "http",
+      "last_verified": "2026-08-28T11:50:00Z"
+    }
+  ]
+}

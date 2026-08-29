@@ -1,0 +1,86 @@
+{
+  "source_id": "titan_cdnlive",
+  "version": 1,
+  "status": "working",
+  "last_verified": "2026-08-28T11:50:00Z",
+  "engine": "http",
+  "content_key": "channel_url",
+  "steps": [
+    {
+      "action": "rewrite",
+      "from": "$content_id",
+      "find": "://cdnlivetv.tv",
+      "replace": "://api.cdnlivetv.tv",
+      "save": "$player"
+    },
+    {
+      "action": "fetch",
+      "url": "$player",
+      "save": "$page",
+      "extract": [
+        {
+          "name": "$fn",
+          "regex": "function (\\w+)\\(s\\)\\{[^}]*atob"
+        },
+        {
+          "name": "$frags",
+          "regex": "var (\\w+)='([^']*)'",
+          "multi": true,
+          "pair": true
+        }
+      ]
+    },
+    {
+      "action": "extract",
+      "from": "$page",
+      "extract": [
+        {
+          "name": "$assembly",
+          "regex": "var \\w+=((?:{fn}\\(\\w+\\)\\+?)+);",
+          "template": true
+        }
+      ]
+    },
+    {
+      "action": "extract",
+      "from": "$assembly",
+      "extract": [
+        {
+          "name": "$parts",
+          "regex": "{fn}\\((\\w+)\\)",
+          "template": true,
+          "multi": true
+        }
+      ]
+    },
+    {
+      "action": "decode_join",
+      "from": "$parts",
+      "lookup": "$frags",
+      "variant": "urlsafe",
+      "save": "$master"
+    },
+    {
+      "action": "verify",
+      "url": "$master",
+      "expect_first_line": "#EXTM3U"
+    }
+  ],
+  "output": {
+    "url": "$master",
+    "headers": {
+      "User-Agent": "$ua"
+    }
+  },
+  "token_behavior": {
+    "expires_seconds": 14400,
+    "bound_to": "token_only",
+    "mint_on": "player_error"
+  },
+  "known_child_domains": [
+    "cdnlivetv.tv",
+    "api.cdnlivetv.tv"
+  ],
+  "escape_hatch": false,
+  "notes": "Traps, priority order: (1) the decoder function name is RANDOMIZED per page load — hardcoding it fails every channel (the first probe died exactly this way); the assembly regexes are TEMPLATES built from the $fn capture. (2) NEVER fetch the apex cdnlivetv.tv player route — it rate-limits brutally (~500 req/hour walls the IP for hours; the whole US titan tier was lost to a 429 wall on 2026-08-28). The IDENTICAL page on api.cdnlivetv.tv is unthrottled and mints the same 4h tokens — the rewrite step is load-bearing, not cosmetic. (3) Fragments are URLSAFE base64 ( - and _ ), padded to %4 before decode. (4) Playable with a plain browser UA, no Referer. (5) Tokens are 4h and NOT IP-bound — a feed-minted URL plays anywhere until it ages out; on-box re-mint matters only when the feed is staler than the token."
+}
