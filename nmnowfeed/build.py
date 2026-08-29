@@ -212,6 +212,11 @@ def main() -> int:
         try:
             st = titan.stream_ref(entry["channel_url"])
             st["minted_utc"] = now_s
+            # App-re-mintable like phoenix: the recipe registry (recipes/titan_cdnlive.json)
+            # knows how to re-mint from channel_url alone, so a 4h token that dies on a
+            # stale feed heals on the box. Additive — older apps ignore the fields.
+            st["resolver"] = "titan"
+            st["channel_id"] = entry["channel_url"]
             return number, st
         except Exception as e:  # noqa: BLE001 — any channel failure degrades that channel only
             print("stream FAIL %s/%s: %s" % (cc, name, str(e)[:120]))
