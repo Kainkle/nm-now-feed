@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -27,6 +28,9 @@ from .lineup import CATEGORIES, LINEUP, LINEUP_INTL
 
 CATALOG_URL = "https://ntv.cx/api/get-channels"
 CATALOG_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+# Whole-transfer budget for the catalog fetch (see load_catalog): ~2 min honest cold,
+# 8 min = tarpit. One number, not per-op — per-op timeouts are exactly the hole.
+CATALOG_DEADLINE_S = 480
 # Publish window: a little history (so "now playing" is right) plus a day ahead.
 # Was 34h for the 411-channel v2 feed (~2.5 MB); the 1262-channel v3 feed crossed
 # the 6 MB size guard at 34h — a steady 30-min rebuild only ever needs to keep the
@@ -68,9 +72,36 @@ def _circular_min_delta(a: int, b: int) -> int:
 def load_catalog(path: str | None) -> list[dict]:
     if path:
         return json.load(open(path, encoding="utf-8"))["channels"]
-    req = urllib.request.Request(CATALOG_URL, headers={"User-Agent": CATALOG_UA})
-    with urllib.request.urlopen(req, timeout=300) as r:
-        return json.loads(r.read().decode("utf-8"))["channels"]
+    # urllib's timeout is PER BLOCKING OP, not per transfer: a byte-drip keeps every
+    # socket read under the cap and the fetch never returns. That is what killed every
+    # scheduled CI build from 2026-08-28 — the job sat silent for 45 minutes INSIDE
+    # this fetch and hit the workflow wall (runs 33166327445..33269224161: zero build
+    # output, and the prints that precede the CI-mode banner never ran; the catalog
+    # fetch is the only wire call in that span). So the read runs on a worker with a
+    # hard join deadline — the catalog is a few MB and honest transfers finish in ~2
+    # min cold (their server cache, not us); past 8 minutes it is a tarpit, and
+    # aborting leaves the previous feed published instead of hanging the runner.
+    result: dict = {}
+
+    def _pull() -> None:
+        req = urllib.request.Request(CATALOG_URL, headers={"User-Agent": CATALOG_UA})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                result["data"] = r.read()
+        except Exception as e:  # noqa: BLE001 — surfaced to the main thread below
+            result["err"] = e
+
+    worker = threading.Thread(target=_pull, daemon=True)
+    worker.start()
+    worker.join(CATALOG_DEADLINE_S)
+    if "data" in result:
+        return json.loads(result["data"].decode("utf-8"))["channels"]
+    if "err" in result:
+        raise result["err"]
+    raise TimeoutError(
+        "catalog fetch unfinished after %ds — tarpitted (drip under the per-op "
+        "timeouts); aborting so the previous feed stays published" % CATALOG_DEADLINE_S
+    )
 
 
 def get_epg_gz(country: str, epg_dir: str) -> str:
@@ -221,7 +252,24 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001 — any channel failure degrades that channel only
             print("stream FAIL %s/%s: %s" % (cc, name, str(e)[:120]))
             prev = fallback.get(number)
-            return number, (prev[1] if prev and prev[0] == name else None)
+            if prev and prev[0] == name:
+                return number, prev[1]
+            # POISONED, NOT STREAMLESS (measured 2026-08-29: cdnlivetv 429-walled the
+            # whole titan-US sweep for a full build's duration and lifted later; 08-28
+            # was the same). The channel's own player-api URL is unplayable as a
+            # stream by construction, so ExoPlayer errors on tune, the app's ladder
+            # fires, and the titan_cdnlive recipe re-mints from channel_id on the
+            # BOX — the wall stops mattering to viewers. Same medicine make_poison.py
+            # proved on the bench. An app without the runner sees one failed tune,
+            # identical to the streamless channel this replaces.
+            return number, {
+                "url": entry["channel_url"],
+                "type": "hls",
+                "resolver": "titan",
+                "channel_id": entry["channel_url"],
+                "minted_utc": now_s,
+                "poisoned": True,
+            }
 
     # 4 workers + a short pause per request: a full 411-channel sweep is a once-ever
     # event now (steady state re-resolves ~80), and the one sweep that earned the

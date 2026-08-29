@@ -33,6 +33,11 @@ jobs:
         # the previous feed's phoenix URLs untouched and mints nothing; only Titan
         # (IP-agnostic) + 9 EPG files are re-resolved here. Phoenix re-mints happen on
         # the home network's builds. Cold run ~10-15 min.
+        # v3.2: PYTHONUNBUFFERED — the 2026-08-28..29 stalls were 45 minutes of SILENCE
+        # inside one blocked read; buffered stdout meant even the prints that DID run
+        # never reached the log. Unbuffered, a stall names its own last line.
+        env:
+          PYTHONUNBUFFERED: "1"
         run: python -m nmnowfeed.build --out feed
       - name: Commit if changed
         run: |

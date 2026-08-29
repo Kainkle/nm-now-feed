@@ -66,6 +66,11 @@ SYNONYMS: dict[tuple[str, str], list[str]] = {
     ("br", "premiere6"): ["São Paulo/SP  Premiere 6"],
     ("br", "premiere7"): ["São Paulo/SP  Premiere 7"],
     ("br", "globosp"): ["São Paulo/SP  Globo"],
+    # dlhd's plain NICK normalises to "nick" -- 4 chars, under the 6-char prefix
+    # floor, so it can never sweep-bind the file's "Nickelodeon HD". Measured
+    # against epg_US 2026-08-29: 'Nickelodeon HD' and 'Nickelodeon (Pacific)'
+    # both present; the HD feed is the national one we want.
+    ("us", "nick"): ["Nickelodeon HD"],
 }
 
 

@@ -54,7 +54,11 @@ def _fetch(url: str, referer: str | None = None, timeout: int = 25, retries: int
                 urllib.request.Request(url, headers=headers), timeout=timeout
             ).read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            if e.code in (429, 502, 503) and attempt < retries:
+            # 500 is retried with the other transients: measured 2026-08-29, dlhd's
+            # tier served HTTP 500 to EVERY channel for the duration of one build
+            # burst (1000+ fails, 4 workers, 0.2s pacing) and the identical chain
+            # resolved clean minutes later — a provider-side window, not per-channel.
+            if e.code in (429, 500, 502, 503) and attempt < retries:
                 time.sleep(1.5 * (attempt + 1) ** 2)
                 continue
             raise
