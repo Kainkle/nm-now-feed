@@ -304,6 +304,28 @@ def main() -> int:
     # on the re-run minutes later, same channels). A paced single-worker retry of only
     # the failures recovers them without re-paying the full sweep.
     phoenix_fails = [r for r in rows if r[1] in dlhd_ids and not streams.get(r[1])]
+    if phoenix_fails and ci_mode:
+        # NEVER mint phoenix on a runner. xameleon masters bind to the minter's IP, and
+        # a runner is not the home WAN — every retry-pass URL is DOA on every box. It is
+        # also the 2026-08-30 wall (run 33283962449): 646 paced single-worker mints
+        # burned the whole 45-min budget and the run died before it could commit. Ship
+        # POISONED refs instead — the watch page is an HTML page, unplayable by
+        # construction, so the box's ladder fires and re-mints from the dlhd id on the
+        # BOX (the recipe system's exact purpose). Home builds keep the retry pass:
+        # home-minted phoenix shares the WAN IP with the boxes and plays.
+        for r in phoenix_fails:
+            number = r[1]
+            streams[number] = {
+                "url": phoenix.WATCH_PAGE % dlhd_ids[number],
+                "type": "hls",
+                "resolver": "phoenix",
+                "channel_id": dlhd_ids[number],
+                "minted_utc": now_s,
+                "poisoned": True,
+            }
+        print("CI mode: %d uncarried phoenix rows shipped as poisoned refs "
+              "(box-side re-mint)" % len(phoenix_fails))
+        phoenix_fails = []
     for r in phoenix_fails:
         number, name = r[1], r[0]
         time.sleep(1.0)
