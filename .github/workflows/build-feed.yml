@@ -8,6 +8,13 @@ on:
     # guard below makes dense slots no-op cheap when the feed is young, so the extra
     # slots cost nothing in steady state; the first slot to fire after any gap builds.
     - cron: "7,21,37,51 * * * *"
+  repository_dispatch:
+    # v3.5: the trigger of record. An external cron service (the user's choice after
+    # GitHub's scheduler dropped 8 consecutive slots on 2026-08-30 with every status
+    # page green) POSTs /repos/Kainkle/nm-now-feed/dispatches every 20 min with
+    # event_type "feed-tick". The freshness guard below makes ticks no-op cheap when
+    # the feed is young — the tick only needs to ARRIVE, not to be smart.
+    types: [feed-tick]
   workflow_dispatch:
     inputs:
       force:
