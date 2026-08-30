@@ -1,0 +1,55 @@
+name: feed-ticker
+
+# THE TRIGGER OF RECORD (2026-08-30). GitHub's own cron dropped eight consecutive
+# build slots with every status page green, and the user wants no local machine, no
+# new account, and no manual key in the loop. So the cadence lives in a self-arming
+# chain: each run sleeps the gap, then dispatches the next build tick AND the next
+# ticker run, using the run-scoped GITHUB_TOKEN (born and dead inside the run).
+# GITHUB_TOKEN-made events normally start no workflows — repository_dispatch is the
+# documented exception, which is exactly what this rides.
+
+on:
+  repository_dispatch:
+    types: [tick-chain]
+  schedule:
+    # RE-SEED ONLY. If a chain run dies (failed curl, killed runner), this timer
+    # starts a new ticker within 30 min. The chain sets the real cadence; this
+    # only guarantees a chain exists.
+    - cron: "3,33 * * * *"
+
+permissions:
+  contents: write  # the repository_dispatch POST requires it
+
+concurrency:
+  # Exactly one ticker alive at any moment. A re-seed CANCELS the sleeping run
+  # (which has dispatched nothing yet) and carries the chain itself — a second
+  # chain can never fork off the first.
+  group: feed-ticker
+  cancel-in-progress: true
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Gap, then arm the next build tick and the next ticker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          GAP_S: "60"  # PROBE VALUE — becomes 1140 (19 min) once two generations are proven
+        run: |
+          sleep "$GAP_S"
+          for EV in feed-tick tick-chain; do
+            code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$REPO/dispatches" \
+              -d "{\"event_type\":\"$EV\"}")
+            echo "dispatch $EV -> HTTP $code"
+            if [ "$code" != "204" ]; then
+              echo "chain link FAILED for $EV"
+              exit 1
+            fi
+          done
+          echo "chain link OK"
