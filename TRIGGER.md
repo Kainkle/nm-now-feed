@@ -1,45 +1,60 @@
-# The feed-build trigger — and why it moved off GitHub's cron
+# The feed-build trigger (2026-08-30) — a self-arming GitHub worker
 
-**2026-08-30:** GitHub's scheduler dropped eight consecutive feed-build slots
-(02:37–05:21 UTC) with the workflow "active" and the status page green. The build
-pipeline itself is fixed (tarpit breaker + CI poison refs + race-healed push — see
-git history), but the *trigger* needed an owner that reports failures. Chosen:
-an external cron service pinging `repository_dispatch` (workflow v3.5, `feed-tick`).
+**No user setup. No user keys. No user machines.** The user asked for an
+always-on trigger that scales to any number of boxes and needs nothing from
+him. This is it.
 
-The freshness guard makes every tick a no-op when the published feed is under 25
-minutes old — the tick only has to ARRIVE, not be smart. GitHub's own cron stays
-enabled as a free second trigger; redundant triggers cannot stack.
+## Why it exists
 
-## Setup (one time, ~2 minutes, both steps are yours — token and account)
+GitHub's own cron dropped eight consecutive build slots (02:37–05:21 UTC) and
+later a four-hour stretch, with the workflow "active" and the status page
+green. Best-effort timers cannot be the only heartbeat for a feed that boxes
+poll every 5 minutes.
 
-### 1. The token (GitHub)
+## How it works
 
-1. github.com → Settings → Developer settings → **Fine-grained tokens** → Generate.
-2. Repository access: **Only select repositories** → `Kainkle/nm-now-feed`.
-3. Permissions → Repository permissions → **Contents: Read and write**.
-   (That is all `repository_dispatch` needs — nothing else.)
-4. Copy the token. If it ever leaks, revoke it from this same page; the blast
-   radius is push-access to this one feed repo.
+Two workflows, one chain:
 
-### 2. The ping (cron-job.org — free tier carries custom headers)
+1. **`feed-ticker.yml`** — the worker. Each run sleeps 19 minutes, then POSTs
+   TWO `repository_dispatch` events with the run-scoped `GITHUB_TOKEN`
+   (a token GitHub makes inside the run; it is dead when the run ends):
+   - `feed-tick` → triggers the build.
+   - `tick-chain` → starts the next ticker run. The chain arms itself.
+2. **`build-feed.yml`** — the builder. Fires on `feed-tick`. Its freshness
+   guard skips the build when the published feed is under 25 minutes old, so
+   redundant triggers cannot stack work.
 
-1. Create the account → **Create Cronjob**.
-2. URL: `https://api.github.com/repos/Kainkle/nm-now-feed/dispatches`
-3. Method: `POST`
-4. Advanced → Headers:
-   - `Authorization: Bearer <PASTE THE TOKEN>`
-   - `Accept: application/vnd.github+json`
-   - `Content-Type: application/json`
-5. Body: `{"event_type":"feed-tick"}`
-6. Schedule: every **20 minutes**.
-7. **Enable failure notifications** — that doubles as the dead-trigger alarm
-   (the one alarm GitHub never gave us).
+The normally-fatal rule — "events made with GITHUB_TOKEN start no workflows" —
+has one documented exception: `repository_dispatch`. The chain rides exactly
+that exception. Proven live 2026-08-30: gen 1 `33316469507` armed gen 2
+`33316521805`, and gen 1's `feed-tick` produced guard-skipped build
+`33316521622` (13 s, success).
+
+## Safety rails
+
+- `concurrency: feed-ticker / cancel-in-progress: true` — exactly one ticker
+  alive. A re-seed cancels the sleeping run (it has dispatched nothing) and
+  carries the chain itself. A second chain cannot fork off the first.
+- Cron `3,33 * * * *` on the ticker is a RE-SEED only: if a link fails, a new
+  chain starts within 30 minutes.
+- The build's own cron (`7,21,37,51`) stays as a free extra trigger; the
+  guard dedupes everything.
+- A link that gets a non-204 from either dispatch FAILS loudly (visible in
+  `gh run list --workflow feed-ticker.yml`).
+
+## Scale
+
+The feed is one file; every box polls the same URL. The number of boxes adds
+no work to the trigger or the build. Per-box stream healing is the app's
+recipe ladder (every stream ref carries `resolver` + `channel_id`), already
+in production.
 
 ## Operating notes
 
-- A healthy tick logs `published feed age: XXm` then either `feed is fresh —
-  skipping this slot` (guard) or a full build + bot commit.
-- Manual build NOW: `gh workflow run build-feed --repo Kainkle/nm-now-feed
-  --ref main -f force=true` (force bypasses the guard).
-- Boxes self-heal per-channel regardless: every stream ref carries
-  resolver+channel_id, and the app's ladder re-mints on tune.
+- Chain health: `gh run list --repo Kainkle/nm-now-feed --workflow feed-ticker.yml`
+  — consecutive `success` runs = alive. A gap longer than ~35 min = dead chain;
+  the re-seed timer restarts it, or seed by hand:
+  `gh api -X POST repos/Kainkle/nm-now-feed/dispatches -f event_type=tick-chain`
+- Build NOW: `gh workflow run build-feed --repo Kainkle/nm-now-feed --ref main -f force=true`
+- To change the cadence: edit `GAP_S` in `feed-ticker.yml` (seconds). The next
+  generation picks it up.
