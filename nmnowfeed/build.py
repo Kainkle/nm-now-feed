@@ -41,9 +41,13 @@ EPG_CACHE_MAX_AGE_S = 6 * 3600
 
 # One self-titled show per epg.pw file, with the UTC minute-of-day its NAME promises.
 # "News at One" must land at 12:00Z (13:00 BST), Tagesthemen at 20:15Z, and so on. If
-# epg.pw ever changes a file's stamps, one of these lands >45min off its own name and
-# the build refuses to publish. Instances are matched by title substring on today's
-# UTC date; weekend gaps ("no instance today") only warn.
+# epg.pw ever changes a file's stamps, one of these lands >2h off its own name and the
+# build QUARANTINES that country: its programmes are blanked (the stamps cannot be
+# trusted) but the feed still publishes. The original behavior — refuse the whole
+# publish — froze every titan token and phoenix rotation fleet-wide for 5h20m on
+# 2026-08-30 because RU's file alone had moved: 11 channels wrong, 1262 starved.
+# Instances are matched by title substring on today's UTC date; weekend gaps
+# ("no instance today") only warn.
 #   (country, epg_id, title-substring, expected_utc_minute, note)
 ANCHORS = [
     ("US", "464902", "World News Tonight", 22 * 60 + 30, "ABC 18:30 ET"),
@@ -347,7 +351,7 @@ def main() -> int:
     # progs_by_number: feed number -> programme list; anchor_ids ride along as
     # "ANCHOR-{CC}" keys so the timezone check shares the single streaming pass.
     progs_by_number: dict[str, list[dict]] = {}
-    anchor_fail = False
+    drifted: set[str] = set()
 
     for country, wall_hours in epg.EPG_COUNTRIES.items():
         rows_cc = [r for r in rows if r[5] == country]
@@ -375,15 +379,11 @@ def main() -> int:
         print("epg %s: %d/%d channels carry programmes%s"
               % (country, matched_rows, len(rows_cc),
                  ("; MISS: " + ", ".join(miss_names[:12]) + (" +%d" % (len(miss_names) - 12) if len(miss_names) > 12 else "")) if miss_names else ""))
-        for number, plist in progs.items():
-            if number.startswith("ANCHOR-"):
-                continue
-            progs_by_number.setdefault(number, []).extend(plist)
-
         # timezone anchors: the first instance of a self-titled show inside the window
         # vs what its own name promises. Not "today's instance" — a build run in the
         # evening has already lost today's morning shows to WINDOW_BACK, and the
         # promised clock time is the same every day the show runs.
+        country_drift = False
         for cc, aid, title_sub, expected_min, note in ANCHORS:
             if cc != country:
                 continue
@@ -404,11 +404,21 @@ def main() -> int:
                   % (cc, title_sub, st.date(), st.hour, st.minute, expected_min // 60,
                      expected_min % 60, note, mark))
             if delta > ANCHOR_TOLERANCE_MIN:
-                anchor_fail = True
+                country_drift = True
 
-    if anchor_fail:
-        print("ANCHOR DRIFT — a country's stamps moved; refusing to publish (previous feed stays)")
-        return 1
+        if country_drift:
+            # Same degradation as the unreadable-file path above: the country's rows
+            # keep numbers and streams but ship no programmes, and every other country
+            # publishes. The quarantine rides into meta so a health check can see it.
+            drifted.add(country)
+            print("epg %s ANCHOR DRIFT — QUARANTINED: stamps moved, programmes blanked; "
+                  "publishing the other countries" % country)
+            continue
+
+        for number, plist in progs.items():
+            if number.startswith("ANCHOR-"):
+                continue
+            progs_by_number.setdefault(number, []).extend(plist)
 
     mapped = sum(1 for r in rows if progs_by_number.get(r[1]))
     total_progs = sum(len(v) for v in progs_by_number.values())
@@ -456,7 +466,13 @@ def main() -> int:
         })
 
     doc = {
-        "meta": {"source": "live", "generated_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ")},
+        "meta": {
+            "source": "live",
+            "generated_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            # Countries whose EPG anchors drifted this build — programmes quarantined.
+            # Empty list on a clean build; the app ignores it either way.
+            "epg_quarantined": sorted(drifted),
+        },
         "categories": (
             [{"id": "recents", "label": "Recents", "icon": "recents"},
              {"id": "favorites", "label": "Favorites", "icon": "favorites", "dividerAfter": True}]
