@@ -36,7 +36,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          GAP_S: "60"  # PROBE VALUE — becomes 1140 (19 min) once two generations are proven
+          GAP_S: "1140"  # 19 min. Probe (60 s) proved the chain on 2026-08-30:
+                         # gen 1 (33316469507) armed gen 2 (33316521805) with its
+                         # run-scoped token — the repository_dispatch carve-out is real.
         run: |
           sleep "$GAP_S"
           for EV in feed-tick tick-chain; do
