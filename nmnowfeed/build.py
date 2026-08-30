@@ -219,6 +219,10 @@ def main() -> int:
 
     now_s = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Closure cell shared by the 4 resolve workers: consecutive titan tarpit strikes.
+    # A plain int would be a rebinding trap across threads — a dict cell mutates in place.
+    tarpit = {"strikes": 0}
+
     def resolve_row(r):
         number, name, cc = r[1], r[0], r[5].lower()
         if number in carry and carry[number][0] == name:
@@ -239,21 +243,8 @@ def main() -> int:
         entry = titan_by.get((cc, name))
         if entry is None:
             return number, None
-        time.sleep(0.15)  # pacing — see the workers comment below
-        try:
-            st = titan.stream_ref(entry["channel_url"])
-            st["minted_utc"] = now_s
-            # App-re-mintable like phoenix: the recipe registry (recipes/titan_cdnlive.json)
-            # knows how to re-mint from channel_url alone, so a 4h token that dies on a
-            # stale feed heals on the box. Additive — older apps ignore the fields.
-            st["resolver"] = "titan"
-            st["channel_id"] = entry["channel_url"]
-            return number, st
-        except Exception as e:  # noqa: BLE001 — any channel failure degrades that channel only
-            print("stream FAIL %s/%s: %s" % (cc, name, str(e)[:120]))
-            prev = fallback.get(number)
-            if prev and prev[0] == name:
-                return number, prev[1]
+
+        def _poisoned() -> dict:
             # POISONED, NOT STREAMLESS (measured 2026-08-29: cdnlivetv 429-walled the
             # whole titan-US sweep for a full build's duration and lifted later; 08-28
             # was the same). The channel's own player-api URL is unplayable as a
@@ -262,7 +253,7 @@ def main() -> int:
             # BOX — the wall stops mattering to viewers. Same medicine make_poison.py
             # proved on the bench. An app without the runner sees one failed tune,
             # identical to the streamless channel this replaces.
-            return number, {
+            return {
                 "url": entry["channel_url"],
                 "type": "hls",
                 "resolver": "titan",
@@ -270,6 +261,37 @@ def main() -> int:
                 "minted_utc": now_s,
                 "poisoned": True,
             }
+
+        # TARPIT CIRCUIT BREAKER (run 33281925055: cdnlivetv byte-drips datacenter IPs —
+        # every CI build since 08-28 froze in the titan phase until the workflow wall).
+        # Three consecutive deadline timeouts = this IP is being tarpitted; grinding the
+        # remaining ~400 channels at 50s each would burn hours. Trip the breaker, and
+        # every remaining titan row ships as a poisoned ref the boxes heal themselves.
+        # A healthy fetch resets the streak — three in a row means drip, not flake.
+        if tarpit["strikes"] >= 3:
+            return number, _poisoned()
+        time.sleep(0.15)  # pacing — see the workers comment below
+        try:
+            st = titan.stream_ref(entry["channel_url"])
+            st["minted_utc"] = now_s
+            tarpit["strikes"] = 0
+            # App-re-mintable like phoenix: the recipe registry (recipes/titan_cdnlive.json)
+            # knows how to re-mint from channel_url alone, so a 4h token that dies on a
+            # stale feed heals on the box. Additive — older apps ignore the fields.
+            st["resolver"] = "titan"
+            st["channel_id"] = entry["channel_url"]
+            return number, st
+        except Exception as e:  # noqa: BLE001 — any channel failure degrades that channel only
+            print("stream FAIL %s/%s: %s" % (cc, name, str(e)[:120]))
+            if isinstance(e, TimeoutError):
+                tarpit["strikes"] += 1
+                if tarpit["strikes"] == 3:
+                    print("titan tier TARPITTED — 3 deadline timeouts in a row; "
+                          "remaining titan rows ship as poisoned refs")
+            prev = fallback.get(number)
+            if prev and prev[0] == name:
+                return number, prev[1]
+            return number, _poisoned()
 
     # 4 workers + a short pause per request: a full 411-channel sweep is a once-ever
     # event now (steady state re-resolves ~80), and the one sweep that earned the

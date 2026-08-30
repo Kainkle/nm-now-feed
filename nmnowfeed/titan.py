@@ -16,6 +16,7 @@ first probe failed exactly this way — NO-ASSEMBLY on every channel). Discover 
 
 import base64
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -32,16 +33,44 @@ _ASSEMBLY = r"%s\((\w+)\)"
 
 def _fetch(url: str, timeout: int = 25, retries: int = 3) -> str:
     """Player-page fetch with 429 backoff — cdnlivetv.tv throttles bursts (measured:
-    ~250 rapid requests earn a 429 wall; backing off seconds clears it)."""
+    ~250 rapid requests earn a 429 wall; backing off seconds clears it).
+
+    The read runs on a worker with a whole-transfer deadline: urllib's timeout is per
+    blocking op, and cdnlivetv TARPITS datacenter IPs with a byte-drip that keeps every
+    op under the cap — measured 2026-08-29/30, every CI build since the 08-28 reorg
+    froze here with four workers blocked mid-read and zero output until the 45-min
+    workflow wall (run 33281925055's unbuffered log: catalog fetched in 4 s, then
+    silence from the first titan resolve). A deadline miss raises, the retry loop backs
+    off, and a fully tarpitted IP fails the build fast instead of hanging the cron.
+    """
     for attempt in range(retries + 1):
-        req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA})
-        try:
-            return urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < retries:
+        result: dict = {}
+
+        def _pull() -> None:
+            req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA})
+            try:
+                result["data"] = urllib.request.urlopen(req, timeout=timeout).read()
+            except Exception as e:  # noqa: BLE001 — surfaced to the caller below
+                result["err"] = e
+
+        worker = threading.Thread(target=_pull, daemon=True)
+        worker.start()
+        worker.join(timeout * 2)  # 2x the per-op timeout = the honest-transfer budget
+        if "data" in result:
+            return result["data"].decode("utf-8", "replace")
+        if "err" in result:
+            e = result["err"]
+            if isinstance(e, urllib.error.HTTPError) and e.code == 429 and attempt < retries:
                 time.sleep(1.5 * (attempt + 1) ** 2)  # 1.5s, 6s, 13.5s
                 continue
-            raise
+            raise e
+        # NOT retried: a drip will not heal in 6s, and retrying it multiplies a
+        # tarpitted sweep into hours. The caller (build.py) owns the tier-level
+        # circuit breaker this exception arms.
+        raise TimeoutError(
+            "titan fetch tarpitted: no complete response in %ds (byte-drip under "
+            "per-op timeouts)" % (timeout * 2)
+        )
 
 
 def _deob(b64: str) -> str:
