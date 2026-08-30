@@ -83,4 +83,8 @@ jobs:
           if [ "$COUNT" -eq 0 ]; then echo "empty feed - refusing to commit"; exit 0; fi
           git add feed/
           git diff --staged --quiet || git commit -m "feed: $COUNT channels, $PROGS programmes [skip ci]"
-          git push
+          # A push can lose a race with a manual push landing mid-build (measured
+          # 2026-08-30: run 33292177983 failed its whole job on exactly this). Rebase
+          # the feed commit onto whatever won and retry once — the feed blob cannot
+          # conflict with anything but itself.
+          git push || (git pull --rebase && git push)
