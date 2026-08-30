@@ -54,6 +54,13 @@ SYNONYMS: dict[tuple[str, str], list[str]] = {
     # ("abc" is under the 6-char prefix floor), so it goes through explicitly.
     ("us", "abc"): ["ABC National Feed"],
     ("us", "wwe"): ["WWE Network"],
+    # Disney JR normalises to "disneyjr" — 8 chars, but the file's variants
+    # ("Disney Junior HD" / "Disney Junior HD (Pacific)") normalise to
+    # "disneyjunior..." — the exact-match fails and the prefix sweep compares
+    # in the wrong direction. Measured against epg_US 2026-08-29: the HD feed
+    # is the national one. (Universal Kids and POP TV are NOT in the file at
+    # all — those stay honestly unbound.)
+    ("us", "disneyjr"): ["Disney Junior HD"],
     # CA's file is affiliate-based; the national rows take the Toronto flagship.
     ("ca", "cbc"): ["CBC Toronto HD"],
     ("ca", "ctv"): ["CTV Toronto HD"],
