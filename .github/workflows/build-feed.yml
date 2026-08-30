@@ -2,10 +2,12 @@ name: build-feed
 
 on:
   schedule:
-    # Every 30 minutes: refreshes Titan tokens (4h TTL) and EPG. Phoenix (3h TTL) is
-    # IP-bound to the minting IP, so this loop CARRIES phoenix URLs (home builds mint
-    # them) — see the Build feed comment. Off the :00/:30 busy marks.
-    - cron: "7,37 * * * *"
+    # v3.3 (2026-08-30): 4 slots/hour, not 2. GitHub's cron is best-effort and tonight
+    # it DROPPED four consecutive slots (02:37–04:07, workflow state "active", zero
+    # runs created) — a 2-slot cadence has no redundancy against drops. The freshness
+    # guard below makes dense slots no-op cheap when the feed is young, so the extra
+    # slots cost nothing in steady state; the first slot to fire after any gap builds.
+    - cron: "7,21,37,51 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -25,7 +27,37 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Freshness guard
+        # SCHEDULED slots skip the build when the published feed is young — dense cron
+        # without the cost. Dispatches always build (a dispatch is an explicit ask).
+        id: guard
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != "schedule" ]; then
+            echo "dispatch — building"; echo "fresh=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          AGE=$(python - <<'EOF'
+          import datetime, json, urllib.request
+          try:
+              d = json.load(urllib.request.urlopen(
+                  "https://raw.githubusercontent.com/Kainkle/nm-now-feed/main/feed/lineup.json",
+                  timeout=30))
+              gen = datetime.datetime.strptime(d["meta"]["generated_utc"], "%Y-%m-%dT%H:%M:%SZ"
+                  ).replace(tzinfo=datetime.timezone.utc)
+              print(int((datetime.datetime.now(datetime.timezone.utc) - gen).total_seconds() // 60))
+          except Exception:
+              print(999)  # unreadable feed = build, never skip on a guess
+          EOF
+          )
+          echo "published feed age: ${AGE}m"
+          echo "age_min=$AGE" >> "$GITHUB_OUTPUT"
+          if [ "$AGE" -lt 25 ]; then
+            echo "feed is fresh — skipping this slot"
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Build feed
+        if: steps.guard.outputs.fresh != 'true'
         # Hard failures abort the job and leave the previous feed published. Per-channel
         # stream failures degrade that channel only and heal on the next 30-min rebuild.
         # The NTV catalog fetch can take ~2 min cold — their server cache, not us.
@@ -40,6 +72,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: python -m nmnowfeed.build --out feed
       - name: Commit if changed
+        if: steps.guard.outputs.fresh != 'true'
         run: |
           git config user.name "nm-now-feed bot"
           git config user.email "actions@github.com"
